@@ -42,7 +42,7 @@ function renderProfiles() {
     const text = document.createElement('span'); text.innerHTML = `<span class="profile-name">${escapeHtml(profile.name)}</span><span class="profile-id">${escapeHtml(profile.id)}</span>`;
     const meta = document.createElement('span'); meta.className = 'profile-meta';
     if (active) { const status = document.createElement('span'); status.className = 'profile-state'; status.textContent = `Open · ${active.port}`; meta.append(status); }
-    const master = document.createElement('label'); master.className = 'master'; const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'master'; radio.checked = state.masterId === profile.id; radio.disabled = !state.selected.has(profile.id); radio.addEventListener('change', () => { state.masterId = profile.id; renderProfiles(); }); master.append(radio, document.createTextNode('Master')); meta.append(master);
+    const master = document.createElement('button'); master.type = 'button'; master.className = `master ${state.masterId === profile.id ? 'active' : ''}`; master.disabled = !state.selected.has(profile.id); master.setAttribute('aria-pressed', String(state.masterId === profile.id)); master.textContent = state.masterId === profile.id ? '✓ Master' : 'Chọn Master'; master.addEventListener('click', (event) => { event.stopPropagation(); state.masterId = profile.id; renderProfiles(); }); meta.append(master);
     row.append(mark, text, meta); list.append(row);
   }
   $('#profileCount').textContent = `${items.length} profile`; $('#selectedCount').textContent = `${state.selected.size} đã chọn`; $('#selectAll').checked = Boolean(items.length) && items.every((profile) => state.selected.has(profile.id));
