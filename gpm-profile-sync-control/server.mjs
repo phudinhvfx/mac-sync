@@ -12,7 +12,7 @@ const publicDir = join(here, 'public');
 const maxProfiles = 10;
 const config = {
   gpmBase: process.env.GPM_API_BASE ?? 'http://127.0.0.1:9495/api/v1',
-  macSyncPath: process.env.MAC_SYNC_PATH ?? '${join(here, '..', 'mac-sync.mjs')}',
+  macSyncPath: process.env.MAC_SYNC_PATH ?? join(here, '..', 'mac-sync.mjs'),
   port: Number(process.env.SYNC_CONTROL_PORT ?? 8788),
 };
 const sessions = new Map(); // profile id -> { id, name, port, position, size, scale }
