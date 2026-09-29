@@ -1,4 +1,4 @@
-const state = { profiles: [], sessions: new Map(), selected: new Set(), masterId: null, config: null, syncRunning: false };
+const state = { profiles: [], sessions: new Map(), selected: new Set(), masterId: null, config: null, syncRunning: false, uiMirrorRunning: false };
 let dragSelection = null;
 const $ = (selector) => document.querySelector(selector);
 const display = () => ({ left: screen.availLeft ?? 0, top: screen.availTop ?? 0, width: screen.availWidth, height: screen.availHeight });
@@ -51,7 +51,8 @@ function renderProfiles() {
 }
 function escapeHtml(value) { const span = document.createElement('span'); span.textContent = value; return span.innerHTML; }
 function setSyncStatus() { const status = $('#syncStatus'); status.classList.toggle('running', state.syncRunning); status.lastChild.textContent = state.syncRunning ? ' Sync running' : ' Sync stopped'; $('#syncButton').textContent = state.syncRunning ? 'Stop sync' : 'Sync'; }
-async function loadStatus() { const data = await api('/api/status'); state.config = data.config; state.sessions = new Map(data.sessions.map((item) => [item.id, item])); state.syncRunning = data.syncRunning; $('#gpmBase').value = data.config.gpmBase; $('#macSyncPath').value = data.config.macSyncPath; setSyncStatus(); }
+function setUiMirrorStatus() { $('#uiMirrorButton').classList.toggle('active', state.uiMirrorRunning); $('#uiMirrorButton').textContent = state.uiMirrorRunning ? 'Stop Chrome UI mirror' : 'Chrome UI mirror'; }
+async function loadStatus() { const data = await api('/api/status'); state.config = data.config; state.sessions = new Map(data.sessions.map((item) => [item.id, item])); state.syncRunning = data.syncRunning; state.uiMirrorRunning = data.uiMirrorRunning; $('#gpmBase').value = data.config.gpmBase; $('#macSyncPath').value = data.config.macSyncPath; setSyncStatus(); setUiMirrorStatus(); }
 async function loadProfiles() { const data = await api(`/api/profiles?search=${encodeURIComponent('')}`); state.profiles = data.profiles; state.sessions = new Map(data.sessions.map((item) => [item.id, item])); renderProfiles(); renderLayout(); }
 function appendLog(event) { const log = $('#log'); if (log.textContent === 'Waiting for sync…') log.textContent = ''; log.textContent += `[${event.at}] ${event.line}\n`; log.scrollTop = log.scrollHeight; }
 
@@ -63,6 +64,7 @@ $('#selectAll').addEventListener('change', (event) => { const visible = state.pr
 $('#startButton').addEventListener('click', withBusy($('#startButton'), async () => { const ids = selectedIds(); const data = await api('/api/start', { method: 'POST', body: JSON.stringify({ profileIds: ids, windowScale: $('#windowScale').value, verticalOrigin: $('#verticalOrigin').value, display: display() }) }); state.sessions = new Map(data.sessions.map((item) => [item.id, item])); renderProfiles(); notice(`Đã mở ${data.sessions.length} profile.`); }));
 $('#closeButton').addEventListener('click', withBusy($('#closeButton'), async () => { const data = await api('/api/close', { method: 'POST', body: JSON.stringify({ profileIds: selectedIds() }) }); state.sessions = new Map(data.sessions.map((item) => [item.id, item])); state.syncRunning = false; setSyncStatus(); renderProfiles(); }));
 $('#syncButton').addEventListener('click', withBusy($('#syncButton'), async () => { if (state.syncRunning) { await api('/api/stop-sync', { method: 'POST', body: '{}' }); state.syncRunning = false; setSyncStatus(); return; } const ids = selectedIds(); if (ids.length < 2) throw new Error('Chọn ít nhất hai profile để Sync.'); if (!state.masterId) throw new Error('Chọn một profile làm Master.'); await api('/api/sync', { method: 'POST', body: JSON.stringify({ profileIds: ids, masterId: state.masterId }) }); state.syncRunning = true; setSyncStatus(); }));
+$('#uiMirrorButton').addEventListener('click', withBusy($('#uiMirrorButton'), async () => { if (state.uiMirrorRunning) { await api('/api/stop-ui-mirror', { method: 'POST', body: '{}' }); state.uiMirrorRunning = false; setUiMirrorStatus(); return; } const ids = selectedIds(); if (ids.length < 2) throw new Error('Chọn ít nhất hai profile để Chrome UI mirror.'); if (!state.masterId) throw new Error('Chọn một profile làm Master.'); await api('/api/start-ui-mirror', { method: 'POST', body: JSON.stringify({ profileIds: ids, masterId: state.masterId }) }); state.uiMirrorRunning = true; setUiMirrorStatus(); }));
 $('#noticeClose').addEventListener('click', () => $('#notice').close());
 new EventSource('/api/logs').onmessage = (message) => appendLog(JSON.parse(message.data));
 window.addEventListener('resize', () => { updateDisplay(); renderLayout(); });
