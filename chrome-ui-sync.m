@@ -30,6 +30,60 @@ static BOOL containsPoint(Bounds bounds, CGPoint point) {
   return point.x >= bounds.x && point.x <= bounds.x + bounds.width && point.y >= bounds.y && point.y <= bounds.y + bounds.height;
 }
 
+static BOOL elementSupportsAction(AXUIElementRef element, CFStringRef wantedAction) {
+  CFArrayRef actions = NULL;
+  if (AXUIElementCopyActionNames(element, &actions) != kAXErrorSuccess || !actions) return NO;
+  BOOL supported = NO;
+  for (CFIndex index = 0; index < CFArrayGetCount(actions); index += 1) {
+    if (CFEqual(CFArrayGetValueAtIndex(actions, index), wantedAction)) { supported = YES; break; }
+  }
+  CFRelease(actions);
+  return supported;
+}
+
+static NSString *stringAttribute(AXUIElementRef element, CFStringRef attribute) {
+  CFTypeRef value = NULL;
+  if (AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess || !value) return @"-";
+  NSString *result = CFGetTypeID(value) == CFStringGetTypeID() ? [NSString stringWithString:(NSString *)value] : @"-";
+  CFRelease(value);
+  return result;
+}
+
+// Intentionally omits title/value so the control log can diagnose Chrome UI
+// structure without recording page titles, URLs, or text typed by the user.
+static NSString *elementSummary(AXUIElementRef element) {
+  CFArrayRef actions = NULL;
+  NSMutableArray *actionNames = [NSMutableArray array];
+  if (AXUIElementCopyActionNames(element, &actions) == kAXErrorSuccess && actions) {
+    for (CFIndex index = 0; index < CFArrayGetCount(actions); index += 1) {
+      CFTypeRef action = CFArrayGetValueAtIndex(actions, index);
+      if (CFGetTypeID(action) == CFStringGetTypeID()) [actionNames addObject:(NSString *)action];
+    }
+    CFRelease(actions);
+  }
+  return [NSString stringWithFormat:@"role=%@ subrole=%@ actions=%@", stringAttribute(element, kAXRoleAttribute), stringAttribute(element, kAXSubroleAttribute), actionNames.count ? [actionNames componentsJoinedByString:@","] : @"-"];
+}
+
+// Chrome can expose the visual part hit by a tab-strip click as an image or a
+// group. Walk to the nearest actionable parent, so the same generic path
+// handles a tab body and its close button without extension-specific rules.
+static AXUIElementRef copyClosestPressableElement(AXUIElementRef hitElement, NSUInteger *depthOut) {
+  AXUIElementRef candidate = (AXUIElementRef)CFRetain(hitElement);
+  for (NSUInteger depth = 0; candidate && depth < 12; depth += 1) {
+    if (elementSupportsAction(candidate, kAXPressAction)) {
+      if (depthOut) *depthOut = depth;
+      return candidate;
+    }
+    CFTypeRef parent = NULL;
+    AXError parentError = AXUIElementCopyAttributeValue(candidate, kAXParentAttribute, &parent);
+    CFRelease(candidate);
+    candidate = parentError == kAXErrorSuccess && parent && CFGetTypeID(parent) == AXUIElementGetTypeID()
+      ? (AXUIElementRef)parent : NULL;
+    if (!candidate && parent) CFRelease(parent);
+  }
+  return NULL;
+}
+
 @interface WindowBinding : NSObject
 @property(nonatomic, retain) NSDictionary *spec;
 @property(nonatomic) AXUIElementRef app;
@@ -45,7 +99,6 @@ static BOOL containsPoint(Bounds bounds, CGPoint point) {
 @property(nonatomic, retain) NSDictionary *config;
 @property(nonatomic, retain) WindowBinding *master;
 @property(nonatomic, retain) NSArray<WindowBinding *> *followers;
-@property(nonatomic) NSTimeInterval transientUntil;
 - (instancetype)initWithConfig:(NSDictionary *)config;
 - (void)resolveWindows;
 - (void)handleClick:(CGPoint)point;
@@ -109,25 +162,40 @@ static BOOL containsPoint(Bounds bounds, CGPoint point) {
   emitLog([NSString stringWithFormat:@"Đã map %@ → %@ follower.", master.spec[@"name"], @(followers.count)]);
 }
 
-- (void)handleClick:(CGPoint)point {
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-    if (!self.master || self.followers.count != [self.config[@"followers"] count]) [self resolveWindows];
-    WindowBinding *master = self.master; if (!master || !containsPoint(master.bounds, point)) return;
-    BOOL inChromeTopBand = point.y <= master.bounds.y + MIN(180, master.bounds.height * 0.28);
-    if (!inChromeTopBand && NSDate.timeIntervalSinceReferenceDate > self.transientUntil) return;
+- (CGPoint)pointForFollower:(WindowBinding *)follower masterPoint:(CGPoint)point {
+  WindowBinding *master = self.master;
+  CGFloat xRatio = (point.x - master.bounds.x) / MAX(master.bounds.width, 1);
+  CGFloat yRatio = (point.y - master.bounds.y) / MAX(master.bounds.height, 1);
+  return CGPointMake(follower.bounds.x + follower.bounds.width * xRatio, follower.bounds.y + follower.bounds.height * yRatio);
+}
 
-    CGFloat xRatio = (point.x - master.bounds.x) / MAX(master.bounds.width, 1);
-    CGFloat yRatio = (point.y - master.bounds.y) / MAX(master.bounds.height, 1);
-    NSUInteger replayed = 0;
-    for (WindowBinding *follower in self.followers) {
-      CGPoint targetPoint = CGPointMake(follower.bounds.x + follower.bounds.width * xRatio, follower.bounds.y + follower.bounds.height * yRatio);
-      AXUIElementRef target = NULL;
-      if (AXUIElementCopyElementAtPosition(follower.app, targetPoint.x, targetPoint.y, &target) != kAXErrorSuccess || !target) continue;
-      if (AXUIElementPerformAction(target, kAXPressAction) == kAXErrorSuccess) replayed += 1;
-      CFRelease(target);
-    }
-    if (replayed) { self.transientUntil = NSDate.timeIntervalSinceReferenceDate + 6; emitLog([NSString stringWithFormat:@"Đã replay Chrome UI tới %@ follower.", @(replayed)]); }
-  });
+- (void)handleClick:(CGPoint)point {
+  if (!self.master || self.followers.count != [self.config[@"followers"] count]) [self resolveWindows];
+  WindowBinding *master = self.master; if (!master || !containsPoint(master.bounds, point)) return;
+  AXUIElementRef masterHit = NULL;
+  NSString *masterSummary = AXUIElementCopyElementAtPosition(master.app, point.x, point.y, &masterHit) == kAXErrorSuccess && masterHit ? elementSummary(masterHit) : @"không hit-test được";
+  if (masterHit) CFRelease(masterHit);
+  NSUInteger replayed = 0, direct = 0, parent = 0, noPressTarget = 0, pressFailed = 0;
+  NSMutableArray *followerSummaries = [NSMutableArray array];
+  for (WindowBinding *follower in self.followers) {
+    CGPoint targetPoint = [self pointForFollower:follower masterPoint:point];
+    AXUIElementRef hitElement = NULL;
+    if (AXUIElementCopyElementAtPosition(follower.app, targetPoint.x, targetPoint.y, &hitElement) != kAXErrorSuccess || !hitElement) { noPressTarget += 1; [followerSummaries addObject:@"không hit-test được"]; continue; }
+    [followerSummaries addObject:elementSummary(hitElement)];
+    NSUInteger depth = 0;
+    AXUIElementRef pressTarget = copyClosestPressableElement(hitElement, &depth);
+    CFRelease(hitElement);
+    if (!pressTarget) { noPressTarget += 1; continue; }
+    if (AXUIElementPerformAction(pressTarget, kAXPressAction) == kAXErrorSuccess) {
+      replayed += 1;
+      if (depth == 0) direct += 1; else parent += 1;
+    } else pressFailed += 1;
+    CFRelease(pressTarget);
+  }
+  if (replayed || noPressTarget || pressFailed) {
+    emitLog([NSString stringWithFormat:@"Click AX Master {%@}; follower {%@}.", masterSummary, [followerSummaries componentsJoinedByString:@" | "]]);
+    emitLog([NSString stringWithFormat:@"Đã replay Chrome UI click tới %@ follower (trực tiếp %@, parent %@, không có AXPress %@, AXPress lỗi %@).", @(replayed), @(direct), @(parent), @(noPressTarget), @(pressFailed)]);
+  }
 }
 @end
 
@@ -153,7 +221,7 @@ int main(int argc, const char * argv[]) {
     if (!tap) { emitLog(@"Không tạo được global click monitor. macOS có thể yêu cầu thêm quyền Input Monitoring cho chrome-ui-sync."); return 3; }
     CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes); CGEventTapEnable(tap, true);
-    emitLog(@"Chrome UI mirror đang chạy: tab, toolbar, extension, menu và side-panel toggle.");
+    emitLog(@"Chrome UI Sync đang chạy: mirror click cho New Tab, toolbar và extension.");
     CFRunLoopRun();
   }
   return 0;

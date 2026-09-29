@@ -70,29 +70,6 @@ class CdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
-    this.contextFrameIds = new Map();
-    this.defaultContextsByFrame = new Map();
-    this.frames = new Map();
-    this.frameMapUpdatedAt = 0;
-    this.on('Runtime.executionContextCreated', ({ context }) => {
-      const frameId = context?.auxData?.frameId;
-      if (!frameId) return;
-      this.contextFrameIds.set(context.id, frameId);
-      if (context.auxData?.isDefault || !this.defaultContextsByFrame.has(frameId)) {
-        this.defaultContextsByFrame.set(frameId, context.id);
-      }
-    });
-    this.on('Runtime.executionContextDestroyed', ({ executionContextId }) => {
-      const frameId = this.contextFrameIds.get(executionContextId);
-      this.contextFrameIds.delete(executionContextId);
-      if (frameId && this.defaultContextsByFrame.get(frameId) === executionContextId) {
-        this.defaultContextsByFrame.delete(frameId);
-      }
-    });
-    this.on('Runtime.executionContextsCleared', () => {
-      this.contextFrameIds.clear();
-      this.defaultContextsByFrame.clear();
-    });
   }
 
   async connect() {
@@ -157,49 +134,6 @@ class CdpClient {
   close() {
     try { this.ws?.close(); } catch { /* best effort */ }
   }
-
-  async enableFrameTracking() {
-    await this.call('Runtime.enable');
-    await this.call('Page.enable');
-    await this.refreshFrameMap(true);
-  }
-
-  async refreshFrameMap(force = false) {
-    if (!force && Date.now() - this.frameMapUpdatedAt < 250) return this.frames;
-    const { frameTree } = await this.call('Page.getFrameTree');
-    const frames = new Map();
-    const visit = (node, path = '') => {
-      if (!node?.frame?.id) return;
-      frames.set(node.frame.id, { path, url: node.frame.url || '' });
-      for (const [index, child] of (node.childFrames ?? []).entries()) {
-        visit(child, path ? `${path}/${index}` : String(index));
-      }
-    };
-    visit(frameTree);
-    this.frames = frames;
-    this.frameMapUpdatedAt = Date.now();
-    return frames;
-  }
-
-  async frameForContext(executionContextId) {
-    const frameId = this.contextFrameIds.get(executionContextId);
-    if (!frameId) return null;
-    const frames = await this.refreshFrameMap();
-    return frames.get(frameId) ?? null;
-  }
-
-  async contextForFrame(path, expectedUrl) {
-    const frames = await this.refreshFrameMap(true);
-    let frameId = [...frames.entries()].find(([, frame]) => frame.path === path)?.[0];
-    if (!frameId && expectedUrl) {
-      frameId = [...frames.entries()].find(([, frame]) => frame.url === expectedUrl)?.[0];
-    }
-    return frameId ? this.defaultContextsByFrame.get(frameId) ?? null : null;
-  }
-
-  defaultExecutionContextIds() {
-    return [...this.defaultContextsByFrame.values()];
-  }
 }
 
 async function getPageEndpoints(port) {
@@ -238,15 +172,13 @@ async function getPageEndpoint(port) {
   return page;
 }
 
-async function evaluate(client, functionSource, argument, executionContextId) {
+async function evaluate(client, functionSource, argument) {
   const expression = `(${functionSource})(${JSON.stringify(argument)})`;
-  const params = {
+  const result = await client.call('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  };
-  if (executionContextId) params.contextId = executionContextId;
-  const result = await client.call('Runtime.evaluate', params);
+  });
   if (result.exceptionDetails) throw new Error(`${client.name}: page evaluation failed`);
   return result.result?.value;
 }
@@ -270,7 +202,6 @@ class VisibleFollower {
     this.client?.close();
     this.client = new CdpClient(`follower:${this.port}`, endpoint.websocketUrl);
     await this.client.connect();
-    await this.client.enableFrameTracking();
     this.websocketUrl = endpoint.websocketUrl;
   }
 
@@ -284,7 +215,7 @@ class VisibleFollower {
 
 const masterListener = String.raw`
 () => {
-  const listenerVersion = 5;
+  const listenerVersion = 4;
   if (window.__gpmMacSyncListenerVersion === listenerVersion) return 'already-installed';
   window.__gpmMacSyncListenerVersion = listenerVersion;
 
@@ -335,7 +266,7 @@ const masterListener = String.raw`
     return {
       type: 'mouse', action, x: event.clientX, y: event.clientY,
       button: event.button, buttons: event.buttons,
-      clickCount: event.detail || 1, modifiers: modifiers(event), selector: selectorFor(event.target),
+      clickCount: event.detail || 1, modifiers: modifiers(event),
     };
   }
   let pendingMove = null;
@@ -404,7 +335,7 @@ async function applyMouse(client, event) {
   return { ok: true };
 }
 
-async function applyValue(client, event, executionContextId) {
+async function applyValue(client, event) {
   return evaluate(client, String.raw`(payload) => {
     const element = document.querySelector(payload.selector);
     if (!element) return { ok: false, reason: 'selector-not-found' };
@@ -426,7 +357,7 @@ async function applyValue(client, event, executionContextId) {
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
     return { ok: true };
-  }`, event, executionContextId);
+  }`, event);
 }
 
 async function applyWheel(client, event) {
@@ -451,54 +382,7 @@ async function applyKey(client, event) {
   return { ok: true };
 }
 
-async function applyFrameMouse(client, event, executionContextId) {
-  // Coordinates inside an iframe are relative to that frame, not the top-level
-  // page. Replaying the click semantically in the matching frame is therefore
-  // more reliable than dispatching those coordinates at the top-level target.
-  if (event.action !== 'up' || !event.selector) return { ok: true, skipped: true };
-  return evaluate(client, String.raw`(payload) => {
-    const element = document.querySelector(payload.selector);
-    if (!element) return { ok: false, reason: 'frame-selector-not-found' };
-    element.focus?.();
-    const options = { bubbles: true, cancelable: true, clientX: payload.x, clientY: payload.y, button: payload.button };
-    element.dispatchEvent(new MouseEvent('mousedown', options));
-    element.dispatchEvent(new MouseEvent('mouseup', options));
-    element.click();
-    return { ok: true };
-  }`, event, executionContextId);
-}
-
-async function applyFrameWheel(client, event, executionContextId) {
-  return evaluate(client, String.raw`(payload) => {
-    const target = document.elementFromPoint(payload.clientX ?? 0, payload.clientY ?? 0) || document.scrollingElement;
-    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: payload.deltaX, deltaY: payload.deltaY });
-    target?.dispatchEvent(wheel);
-    if (!wheel.defaultPrevented) window.scrollBy(payload.deltaX, payload.deltaY);
-    return { ok: true };
-  }`, event, executionContextId);
-}
-
-async function applyFrameKey(client, event, executionContextId) {
-  return evaluate(client, String.raw`(payload) => {
-    const target = document.activeElement || document.body;
-    target.dispatchEvent(new KeyboardEvent(payload.action === 'up' ? 'keyup' : 'keydown', {
-      bubbles: true, cancelable: true, key: payload.key, code: payload.code,
-      altKey: Boolean(payload.modifiers & 1), ctrlKey: Boolean(payload.modifiers & 2),
-      metaKey: Boolean(payload.modifiers & 4), shiftKey: Boolean(payload.modifiers & 8), repeat: payload.repeat,
-    }));
-    return { ok: true };
-  }`, event, executionContextId);
-}
-
 async function applyEvent(client, event) {
-  if (event.framePath !== undefined) {
-    const executionContextId = await client.contextForFrame(event.framePath, event.frameUrl);
-    if (!executionContextId) return { ok: false, reason: 'matching-frame-not-found' };
-    if (event.type === 'mouse') return applyFrameMouse(client, event, executionContextId);
-    if (event.type === 'set-value') return applyValue(client, event, executionContextId);
-    if (event.type === 'key') return applyFrameKey(client, event, executionContextId);
-    if (event.type === 'wheel') return applyFrameWheel(client, event, executionContextId);
-  }
   if (event.type === 'mouse') return applyMouse(client, event);
   if (event.type === 'set-value') return applyValue(client, event);
   if (event.type === 'key') return applyKey(client, event);
@@ -518,12 +402,8 @@ async function main() {
   // Keep this agent resident until the operator explicitly stops it.
   const keepAlive = setInterval(() => {}, 60_000);
   let eventChain = Promise.resolve();
-  const queueEvent = (event, sourceClient, executionContextId) => {
+  const queueEvent = (event) => {
     eventChain = eventChain.then(async () => {
-      const frame = await sourceClient.frameForContext(executionContextId);
-      if (frame?.path) {
-        event = { ...event, framePath: frame.path, frameUrl: frame.url };
-      }
       const label = event.type === 'set-value' ? `${event.type}(${String(event.value ?? '').length} chars)` : event.type === 'mouse' ? `mouse:${event.action}` : event.type;
       const results = await Promise.allSettled(targets.map((target) => target.apply(event)));
       const report = results.map((result, index) => {
@@ -536,18 +416,19 @@ async function main() {
 
   const masterSessions = new Map();
   const installMaster = async (client) => {
-    await client.enableFrameTracking();
+    await client.call('Runtime.enable');
+    await client.call('Page.enable');
     await client.call('Runtime.addBinding', { name: 'gpmMacSyncEmit' });
     await client.call('Page.addScriptToEvaluateOnNewDocument', { source: `(${masterListener})()` });
-    await Promise.all(client.defaultExecutionContextIds().map((contextId) => evaluate(client, masterListener, null, contextId)));
+    await evaluate(client, masterListener, null);
     client.on('Runtime.bindingCalled', (message) => {
       if (message.name !== 'gpmMacSyncEmit') return;
       let event;
       try { event = JSON.parse(message.payload); } catch { return; }
       // Ignore callbacks left by older listener versions in a page that was
       // already open when this process restarted.
-      if (event.listenerVersion !== 5) return;
-      queueEvent(event, client, message.executionContextId);
+      if (event.listenerVersion !== 4) return;
+      queueEvent(event);
     });
   };
   await installMaster(master);

@@ -12,8 +12,8 @@ const publicDir = join(here, 'public');
 const maxProfiles = 10;
 const config = {
   gpmBase: process.env.GPM_API_BASE ?? 'http://127.0.0.1:9495/api/v1',
-  macSyncPath: process.env.MAC_SYNC_PATH ?? '/Users/gpmuser/Documents/Codex/2026-09-28/t-i-v-a-test-th/outputs/mac-sync.mjs',
-  uiMirrorSourcePath: process.env.CHROME_UI_SYNC_PATH ?? '/Users/gpmuser/Documents/Codex/2026-09-28/t-i-v-a-test-th/outputs/chrome-ui-sync.m',
+  macSyncPath: process.env.MAC_SYNC_PATH ?? join(here, '..', 'mac-sync.mjs'),
+  chromeUiSyncPath: process.env.CHROME_UI_SYNC_PATH ?? join(here, '..', 'chrome-ui-sync.m'),
   port: Number(process.env.SYNC_CONTROL_PORT ?? 8788),
 };
 const sessions = new Map(); // profile id -> { id, name, port, position, size, scale }
@@ -112,7 +112,7 @@ function stopUiMirror() {
   if (!uiMirrorProcess) return false;
   uiMirrorProcess.kill('SIGTERM');
   uiMirrorProcess = null;
-  broadcastLog('Chrome UI mirror stopped.', 'info');
+  broadcastLog('Chrome UI Sync stopped.', 'info');
   return true;
 }
 
@@ -127,17 +127,36 @@ function runCommand(command, args) {
 }
 
 async function ensureUiMirrorBinary() {
-  const source = config.uiMirrorSourcePath;
-  if (!existsSync(source)) throw new Error(`Không tìm thấy Accessibility helper: ${source}`);
+  const source = config.chromeUiSyncPath;
+  if (!existsSync(source)) throw new Error(`Không tìm thấy chrome-ui-sync.m: ${source}`);
   const buildDir = join(dirname(source), '.build');
   const binary = join(buildDir, 'chrome-ui-sync');
   const [sourceInfo, binaryInfo] = await Promise.all([stat(source), stat(binary).catch(() => null)]);
   if (!binaryInfo || binaryInfo.mtimeMs < sourceInfo.mtimeMs) {
     await mkdir(buildDir, { recursive: true });
-    broadcastLog('Đang build Chrome UI Accessibility helper…', 'info');
+    broadcastLog('Đang build Chrome UI Sync helper…', 'info');
     await runCommand('/usr/bin/xcrun', ['clang', '-fno-objc-arc', '-fmodules-cache-path=/private/tmp/gpm-sync-modules', '-framework', 'Cocoa', '-framework', 'ApplicationServices', source, '-o', binary]);
   }
   return binary;
+}
+
+async function startUiMirror(masterId, followerIds) {
+  if (uiMirrorProcess) throw new Error('Chrome UI Sync đang chạy. Hãy dừng trước khi khởi động lại.');
+  const master = sessions.get(masterId);
+  const followers = followerIds.map((id) => sessions.get(id));
+  if (!master) throw new Error('Master chưa được mở từ app này.');
+  if (followers.length < 1 || followers.some((profile) => !profile)) throw new Error('Cần ít nhất một listener đã được mở từ app này.');
+  const binary = await ensureUiMirrorBinary();
+  const spec = (profile) => ({ id: profile.id, name: profile.name, x: profile.position.x, y: profile.position.y, width: profile.size.width, height: profile.size.height });
+  const child = spawn(binary, ['--config', JSON.stringify({ master: spec(master), followers: followers.map(spec) })], { stdio: ['ignore', 'pipe', 'pipe'] });
+  uiMirrorProcess = child;
+  broadcastLog(`Chrome UI Sync started: ${master.name} → ${followers.map((profile) => profile.name).join(', ')}.`, 'success');
+  child.stdout.on('data', (chunk) => String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => broadcastLog(line)));
+  child.stderr.on('data', (chunk) => String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => broadcastLog(line, 'error')));
+  child.once('exit', (code, signal) => {
+    if (uiMirrorProcess === child) uiMirrorProcess = null;
+    broadcastLog(`Chrome UI Sync exited (${signal || `code ${code}`}).`, code === 0 ? 'info' : 'error');
+  });
 }
 
 function startSync(masterId, followerIds) {
@@ -159,26 +178,6 @@ function startSync(masterId, followerIds) {
   child.once('exit', (code, signal) => {
     if (syncProcess === child) syncProcess = null;
     broadcastLog(`Sync exited (${signal || `code ${code}`}).`, code === 0 ? 'info' : 'error');
-  });
-}
-
-async function startUiMirror(masterId, followerIds) {
-  if (uiMirrorProcess) throw new Error('Chrome UI mirror đang chạy.');
-  const master = sessions.get(masterId);
-  const followers = followerIds.map((id) => sessions.get(id));
-  if (!master) throw new Error('Master chưa được mở từ app này.');
-  if (followers.length < 1 || followers.some((profile) => !profile)) throw new Error('Cần ít nhất một follower đã được mở từ app này.');
-  const binary = await ensureUiMirrorBinary();
-  const asSpec = (profile) => ({ id: profile.id, name: profile.name, x: profile.position.x, y: profile.position.y, width: profile.size.width, height: profile.size.height });
-  const helperConfig = JSON.stringify({ master: asSpec(master), followers: followers.map(asSpec) });
-  const child = spawn(binary, ['--config', helperConfig], { stdio: ['ignore', 'pipe', 'pipe'] });
-  uiMirrorProcess = child;
-  broadcastLog(`Chrome UI mirror started: ${master.name} → ${followers.map((profile) => profile.name).join(', ')}.`, 'success');
-  child.stdout.on('data', (chunk) => String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => broadcastLog(line)));
-  child.stderr.on('data', (chunk) => String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => broadcastLog(line, 'error')));
-  child.once('exit', (code, signal) => {
-    if (uiMirrorProcess === child) uiMirrorProcess = null;
-    broadcastLog(`Chrome UI mirror exited (${signal || `code ${code}`}).`, code === 0 ? 'info' : 'error');
   });
 }
 

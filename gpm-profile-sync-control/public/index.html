@@ -46,11 +46,7 @@
         <div class="section-heading"><div><h2>Profiles</h2><p id="profileCount">Chưa tải danh sách</p></div><button id="reloadProfiles" class="icon-button" title="Tải lại danh sách" aria-label="Tải lại danh sách">↻</button></div>
         <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Tìm theo tên profile…"></label>
         <div class="list-toolbar"><label><input id="selectAll" type="checkbox"> Chọn tất cả kết quả lọc</label><span id="selectedCount">0 đã chọn</span></div>
-        <label class="master-picker">Profile Master
-          <select id="masterPicker" aria-describedby="masterHelp"></select>
-          <span id="masterHelp">Chọn tại đây để tự thêm profile vào nhóm Sync và đặt làm Master.</span>
-        </label>
-        <p class="selection-help">Click vào một hàng để chọn; giữ chuột và kéo qua các hàng để quét chọn nhiều profile.</p>
+        <p class="selection-help">Click vào bất kỳ vùng trống nào trên hàng để chọn profile. Cột Master chỉ chọn một profile làm nguồn đồng bộ.</p>
         <div class="profile-list" id="profileList" role="list"></div>
       </section>
 
@@ -60,8 +56,8 @@
         <button id="startButton" class="primary">Start</button>
         <button id="closeButton" class="secondary">Close</button>
         <button id="syncButton" class="accent">Sync</button>
-        <button id="uiMirrorButton" class="secondary">Chrome UI mirror</button>
-        <p class="hint">Mirror tab, toolbar, extension, menu và side-panel. Lần đầu macOS sẽ yêu cầu quyền Accessibility.</p>
+        <button id="uiMirrorButton" class="secondary">Sync Chrome UI</button>
+        <p class="hint">Replay chuột, phím và text của Master sang listener theo tọa độ tương đối. Cần quyền Accessibility và Input Monitoring cho helper.</p>
         <div class="rule"></div>
         <h2>Sync log</h2>
         <pre id="log" aria-live="polite">Waiting for sync…</pre>
