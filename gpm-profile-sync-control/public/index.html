@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>GPM Profile Sync Control</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%2310b981'/%3E%3Cpath d='M17 20h30v24H17z' fill='none' stroke='white' stroke-width='5'/%3E%3Cpath d='M23 32h18M32 23v18' stroke='white' stroke-width='5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header>
+      <div><p class="eyebrow">LOCAL CONTROL PANEL</p><h1>GPM Profile Sync</h1></div>
+      <div id="syncStatus" class="status"><span></span> Sync stopped</div>
+    </header>
+
+    <section class="warning" aria-label="Cảnh báo quan trọng">
+      <strong>Trước khi bấm Start, hãy đóng toàn bộ profile đang mở trong GPMLoginGlobal.</strong>
+      <span>App này chỉ quản lý các profile do chính nó mở để tránh xung đột.</span>
+    </section>
+
+    <section class="workspace">
+      <aside class="settings panel">
+        <h2>Khởi tạo</h2>
+        <label>GPM Local API<input id="gpmBase" type="url" spellcheck="false"></label>
+        <label>Đường dẫn mac-sync.mjs<input id="macSyncPath" type="text" spellcheck="false"></label>
+        <label>Window scale
+          <select id="windowScale">
+            <option value="0.6">0.6</option><option value="0.7">0.7</option><option value="0.8">0.8</option><option value="0.9">0.9</option><option value="1" selected>1.0</option>
+          </select>
+        </label>
+        <label>Gốc tọa độ dọc
+          <select id="verticalOrigin"><option value="top">Trên → dưới</option><option value="bottom">Dưới → trên</option></select>
+        </label>
+        <p class="hint">Scale và gốc tọa độ chỉ áp dụng khi mở profile. Nếu bố cục bị đảo hàng, chọn “Dưới → trên” rồi Close và Start lại.</p>
+        <div id="displayInfo" class="display-info">Đang đọc màn hình…</div>
+        <button id="saveConfig" class="secondary">Lưu cấu hình</button>
+
+        <h2 class="layout-title">Bố cục mở</h2>
+        <div id="layoutPreview" class="layout-preview" aria-label="Xem trước bố cục cửa sổ"></div>
+        <p id="layoutText" class="hint"></p>
+      </aside>
+
+      <section class="profiles panel">
+        <div class="section-heading"><div><h2>Profiles</h2><p id="profileCount">Chưa tải danh sách</p></div><button id="reloadProfiles" class="icon-button" title="Tải lại danh sách" aria-label="Tải lại danh sách">↻</button></div>
+        <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Tìm theo tên profile…"></label>
+        <div class="list-toolbar"><label><input id="selectAll" type="checkbox"> Chọn tất cả kết quả lọc</label><span id="selectedCount">0 đã chọn</span></div>
+        <p class="selection-help">Click vào một hàng để chọn; giữ chuột và kéo qua các hàng để quét chọn nhiều profile.</p>
+        <div class="profile-list" id="profileList" role="list"></div>
+      </section>
+
+      <aside class="actions panel">
+        <h2>Điều khiển</h2>
+        <p class="hint">Chọn ít nhất hai profile. Chọn một profile làm Master trước khi Sync.</p>
+        <button id="startButton" class="primary">Start</button>
+        <button id="closeButton" class="secondary">Close</button>
+        <button id="syncButton" class="accent">Sync</button>
+        <div class="rule"></div>
+        <h2>Sync log</h2>
+        <pre id="log" aria-live="polite">Waiting for sync…</pre>
+      </aside>
+    </section>
+  </main>
+
+  <dialog id="notice"><p id="noticeText"></p><button id="noticeClose" class="primary">Đã hiểu</button></dialog>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
