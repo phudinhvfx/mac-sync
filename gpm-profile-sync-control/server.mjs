@@ -13,6 +13,7 @@ const maxProfiles = 10;
 const config = {
   gpmBase: process.env.GPM_API_BASE ?? 'http://127.0.0.1:9495/api/v1',
   macSyncPath: process.env.MAC_SYNC_PATH ?? join(here, '..', 'mac-sync.mjs'),
+  tabUrlSyncPath: process.env.TAB_URL_SYNC_PATH ?? join(here, '..', 'tab-url-sync.mjs'),
   chromeUiSyncPath: process.env.CHROME_UI_SYNC_PATH ?? join(here, '..', 'chrome-ui-sync.m'),
   port: Number(process.env.SYNC_CONTROL_PORT ?? 8788),
 };
@@ -20,6 +21,7 @@ const sessions = new Map(); // profile id -> { id, name, port, position, size, s
 const logClients = new Set();
 let syncProcess = null;
 let uiMirrorProcess = null;
+let tabUrlSyncProcess = null;
 
 function writeJson(response, status, data) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -116,6 +118,14 @@ function stopUiMirror() {
   return true;
 }
 
+function stopTabUrlSync() {
+  if (!tabUrlSyncProcess) return false;
+  tabUrlSyncProcess.kill('SIGTERM');
+  tabUrlSyncProcess = null;
+  broadcastLog('Tab & URL Sync stopped.', 'info');
+  return true;
+}
+
 function runCommand(command, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -181,6 +191,28 @@ function startSync(masterId, followerIds) {
   });
 }
 
+function startTabUrlSync(masterId, followerIds) {
+  if (tabUrlSyncProcess) throw new Error('Tab & URL Sync đang chạy. Hãy dừng trước khi khởi động lại.');
+  const master = sessions.get(masterId);
+  const followers = followerIds.map((id) => sessions.get(id));
+  if (!master) throw new Error('Master chưa được mở từ app này.');
+  if (followers.length < 1 || followers.some((profile) => !profile)) throw new Error('Cần ít nhất một follower đã được mở từ app này.');
+  if (!existsSync(config.tabUrlSyncPath)) throw new Error(`Không tìm thấy tab-url-sync.mjs: ${config.tabUrlSyncPath}`);
+
+  const ports = followers.map((profile) => profile.port);
+  const child = spawn(process.execPath, [config.tabUrlSyncPath, '--master', String(master.port), '--targets', ports.join(',')], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  tabUrlSyncProcess = child;
+  broadcastLog(`Tab & URL Sync started: ${master.name} (${master.port}) → ${followers.map((profile) => `${profile.name} (${profile.port})`).join(', ')}.`, 'success');
+  child.stdout.on('data', (chunk) => String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => broadcastLog(line)));
+  child.stderr.on('data', (chunk) => String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => broadcastLog(line, 'error')));
+  child.once('exit', (code, signal) => {
+    if (tabUrlSyncProcess === child) tabUrlSyncProcess = null;
+    broadcastLog(`Tab & URL Sync exited (${signal || `code ${code}`}).`, code === 0 ? 'info' : 'error');
+  });
+}
+
 async function listProfiles(search) {
   const profiles = [];
   let page = 1;
@@ -197,7 +229,7 @@ async function listProfiles(search) {
 
 async function handleApi(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/status') {
-    return writeJson(response, 200, { config, sessions: sessionView(), syncRunning: Boolean(syncProcess), uiMirrorRunning: Boolean(uiMirrorProcess), maxProfiles });
+    return writeJson(response, 200, { config, sessions: sessionView(), syncRunning: Boolean(syncProcess), uiMirrorRunning: Boolean(uiMirrorProcess), tabUrlSyncRunning: Boolean(tabUrlSyncProcess), maxProfiles });
   }
   if (request.method === 'GET' && url.pathname === '/api/profiles') {
     const profiles = await listProfiles(url.searchParams.get('search') ?? '');
@@ -247,7 +279,7 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/close') {
     const ids = [...new Set(body.profileIds ?? [])];
     if (!ids.length) throw new Error('Hãy chọn profile cần đóng.');
-    if (ids.some((id) => sessions.has(id))) { stopSync(); stopUiMirror(); }
+    if (ids.some((id) => sessions.has(id))) { stopSync(); stopUiMirror(); stopTabUrlSync(); }
     const closed = [];
     for (const id of ids) {
       if (!sessions.has(id)) continue;
@@ -279,6 +311,16 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/stop-ui-mirror') {
     return writeJson(response, 200, { stopped: stopUiMirror() });
   }
+  if (url.pathname === '/api/start-tab-url-sync') {
+    const selected = [...new Set(body.profileIds ?? [])];
+    const masterId = body.masterId;
+    if (!selected.includes(masterId)) throw new Error('Chọn một profile đã chọn làm Master.');
+    startTabUrlSync(masterId, selected.filter((id) => id !== masterId));
+    return writeJson(response, 200, { tabUrlSyncRunning: true });
+  }
+  if (url.pathname === '/api/stop-tab-url-sync') {
+    return writeJson(response, 200, { stopped: stopTabUrlSync() });
+  }
   return writeJson(response, 404, { error: 'Not found' });
 }
 
@@ -302,5 +344,5 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(config.port, '127.0.0.1', () => console.log(`GPM Profile Sync Control: http://127.0.0.1:${config.port}`));
-process.on('SIGINT', () => { stopSync(); stopUiMirror(); server.close(() => process.exit(0)); });
-process.on('SIGTERM', () => { stopSync(); stopUiMirror(); server.close(() => process.exit(0)); });
+process.on('SIGINT', () => { stopSync(); stopUiMirror(); stopTabUrlSync(); server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => { stopSync(); stopUiMirror(); stopTabUrlSync(); server.close(() => process.exit(0)); });
