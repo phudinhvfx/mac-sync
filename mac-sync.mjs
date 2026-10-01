@@ -215,9 +215,14 @@ class VisibleFollower {
 
 const masterListener = String.raw`
 () => {
-  const listenerVersion = 4;
-  if (window.__gpmMacSyncListenerVersion === listenerVersion) return 'already-installed';
+  const listenerVersion = 5;
+  // Do not stack listeners when a synchronizer is restarted while this tab
+  // stays open. Older listener versions need a one-time profile restart to be
+  // cleared because they did not expose a cleanup hook.
+  if (window.__gpmMacSyncListenerVersion) return 'already-installed';
   window.__gpmMacSyncListenerVersion = listenerVersion;
+  const listenerAbort = new AbortController();
+  const pendingInputTimers = new Set();
 
   const q = (value) => CSS.escape(String(value));
   function selectorFor(element) {
@@ -256,6 +261,7 @@ const masterListener = String.raw`
     const entry = pendingInputs.get(element);
     if (!entry) return;
     clearTimeout(entry.timer);
+    pendingInputTimers.delete(entry.timer);
     pendingInputs.delete(element);
     emit({ type: 'set-value', selector: selectorFor(element), value: entry.value, tag: element.tagName.toLowerCase() });
   }
@@ -284,24 +290,31 @@ const masterListener = String.raw`
     if (!event.buttons) return;
     pendingMove = mousePayload(event, 'move');
     if (!moveTimer) moveTimer = setTimeout(flushMove, 16);
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   document.addEventListener('mousedown', (event) => {
     flushMove();
     emit(mousePayload(event, 'down'));
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   document.addEventListener('mouseup', (event) => {
     flushMove();
     emit(mousePayload(event, 'up'));
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   document.addEventListener('input', (event) => {
     const element = event.target;
     if (!editable(element)) return;
     const value = element.isContentEditable ? element.textContent : element.value;
     const previous = pendingInputs.get(element);
-    if (previous) clearTimeout(previous.timer);
-    const timer = setTimeout(() => flushInput(element), 250);
+    if (previous) {
+      clearTimeout(previous.timer);
+      pendingInputTimers.delete(previous.timer);
+    }
+    const timer = setTimeout(() => {
+      pendingInputTimers.delete(timer);
+      flushInput(element);
+    }, 250);
+    pendingInputTimers.add(timer);
     pendingInputs.set(element, { value, timer });
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   document.addEventListener('change', (event) => {
     const element = event.target;
     if (!editable(element)) return;
@@ -310,17 +323,27 @@ const masterListener = String.raw`
     if (hadPendingInput) return;
     const value = element.isContentEditable ? element.textContent : element.value;
     emit({ type: 'set-value', selector: selectorFor(element), value, tag: element.tagName.toLowerCase() });
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   document.addEventListener('keydown', (event) => {
     const text = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey ? event.key : '';
     emit({ type: 'key', action: 'down', key: event.key, code: event.code, text, modifiers: modifiers(event), repeat: event.repeat });
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   document.addEventListener('keyup', (event) => {
     emit({ type: 'key', action: 'up', key: event.key, code: event.code, modifiers: modifiers(event) });
-  }, true);
+  }, { capture: true, signal: listenerAbort.signal });
   window.addEventListener('wheel', (event) => {
     emit({ type: 'wheel', deltaX: event.deltaX, deltaY: event.deltaY, clientX: event.clientX, clientY: event.clientY, modifiers: modifiers(event) });
-  }, { capture: true, passive: true });
+  }, { capture: true, passive: true, signal: listenerAbort.signal });
+  window.__gpmMacSyncCleanup = () => {
+    listenerAbort.abort();
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = null;
+    pendingMove = null;
+    pendingInputTimers.forEach((timer) => clearTimeout(timer));
+    pendingInputTimers.clear();
+    delete window.__gpmMacSyncListenerVersion;
+    delete window.__gpmMacSyncCleanup;
+  };
   return 'installed';
 }`;
 
@@ -410,7 +433,11 @@ async function main() {
         if (result.status === 'rejected') return `${config.targets[index]}:error`;
         return `${config.targets[index]}:${result.value.ok ? 'ok' : result.value.reason}`;
       });
-      console.log(`[${new Date().toLocaleTimeString()}] ${label} → ${report.join(', ')}`);
+      // Drag updates are already coalesced at 16 ms. Logging each one floods
+      // the control-panel EventSource and grows its DOM for no operator value.
+      if (!(event.type === 'mouse' && event.action === 'move')) {
+        console.log(`[${new Date().toLocaleTimeString()}] ${label} → ${report.join(', ')}`);
+      }
     }).catch((error) => console.error(`Sync error: ${error.message}`));
   };
 
@@ -419,7 +446,7 @@ async function main() {
     await client.call('Runtime.enable');
     await client.call('Page.enable');
     await client.call('Runtime.addBinding', { name: 'gpmMacSyncEmit' });
-    await client.call('Page.addScriptToEvaluateOnNewDocument', { source: `(${masterListener})()` });
+    const newDocumentScript = await client.call('Page.addScriptToEvaluateOnNewDocument', { source: `(${masterListener})()` });
     await evaluate(client, masterListener, null);
     client.on('Runtime.bindingCalled', (message) => {
       if (message.name !== 'gpmMacSyncEmit') return;
@@ -427,12 +454,13 @@ async function main() {
       try { event = JSON.parse(message.payload); } catch { return; }
       // Ignore callbacks left by older listener versions in a page that was
       // already open when this process restarted.
-      if (event.listenerVersion !== 4) return;
+      if (event.listenerVersion !== 5) return;
       queueEvent(event);
     });
+    return { client, newDocumentScriptId: newDocumentScript.identifier };
   };
-  await installMaster(master);
-  masterSessions.set(masterEndpoint.websocketUrl, master);
+  const masterSession = await installMaster(master);
+  masterSessions.set(masterEndpoint.websocketUrl, masterSession);
 
   console.log(`Mac Sync ready. Master=${config.master}; followers=${config.targets.join(',')}; URL matching is disabled.`);
   console.log(`Visible master page: ${masterEndpoint.url}`);
@@ -448,8 +476,8 @@ async function main() {
         if (masterSessions.has(endpoint.websocketUrl)) continue;
         const client = new CdpClient(`master:${config.master}`, endpoint.websocketUrl);
         await client.connect();
-        await installMaster(client);
-        masterSessions.set(endpoint.websocketUrl, client);
+        const session = await installMaster(client);
+        masterSessions.set(endpoint.websocketUrl, session);
       }
       // URLs and tab switches remain local. This monitor only installs the
       // input listener on master tabs opened after the script starts.
@@ -457,16 +485,27 @@ async function main() {
     polling = false;
   }, 500);
 
-  const shutdown = () => {
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\nStopping Mac Sync. GPM profiles stay open.');
     clearInterval(keepAlive);
     clearInterval(tabMonitor);
-    masterSessions.forEach((client) => client.close());
+    await Promise.allSettled([...masterSessions.values()].map(async ({ client, newDocumentScriptId }) => {
+      try { await evaluate(client, '() => { window.__gpmMacSyncCleanup?.(); return "cleaned"; }', null); } catch { /* best effort */ }
+      try {
+        if (newDocumentScriptId) {
+          await client.call('Page.removeScriptToEvaluateOnNewDocument', { identifier: newDocumentScriptId });
+        }
+      } catch { /* best effort */ }
+      client.close();
+    }));
     targets.forEach((target) => target.close());
     process.exit(0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
 }
 
 main().catch((error) => {

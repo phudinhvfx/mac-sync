@@ -1,4 +1,5 @@
 const state = { profiles: [], sessions: new Map(), selected: new Set(), masterId: null, config: null, syncRunning: false, uiMirrorRunning: false, tabUrlSyncRunning: false };
+const maxLogLines = 500;
 const $ = (selector) => document.querySelector(selector);
 const display = () => ({ left: screen.availLeft ?? 0, top: screen.availTop ?? 0, width: screen.availWidth, height: screen.availHeight });
 
@@ -51,7 +52,13 @@ function setUiMirrorStatus() { $('#uiMirrorButton').classList.toggle('active', s
 function setTabUrlSyncStatus() { $('#tabUrlSyncButton').classList.toggle('active', state.tabUrlSyncRunning); $('#tabUrlSyncButton').textContent = state.tabUrlSyncRunning ? 'Stop Tab & URL Sync' : 'Sync Tab & URL'; }
 async function loadStatus() { const data = await api('/api/status'); state.config = data.config; state.sessions = new Map(data.sessions.map((item) => [item.id, item])); state.syncRunning = data.syncRunning; state.uiMirrorRunning = data.uiMirrorRunning; state.tabUrlSyncRunning = data.tabUrlSyncRunning; $('#gpmBase').value = data.config.gpmBase; $('#macSyncPath').value = data.config.macSyncPath; setSyncStatus(); setUiMirrorStatus(); setTabUrlSyncStatus(); }
 async function loadProfiles() { const data = await api(`/api/profiles?search=${encodeURIComponent('')}`); state.profiles = data.profiles; state.sessions = new Map(data.sessions.map((item) => [item.id, item])); renderProfiles(); renderLayout(); }
-function appendLog(event) { const log = $('#log'); if (log.textContent === 'Waiting for sync…') log.textContent = ''; log.textContent += `[${event.at}] ${event.line}\n`; log.scrollTop = log.scrollHeight; }
+function appendLog(event) {
+  const log = $('#log');
+  const lines = log.textContent === 'Waiting for sync…' ? [] : log.textContent.trimEnd().split('\n');
+  lines.push(`[${event.at}] ${event.line}`);
+  log.textContent = lines.slice(-maxLogLines).join('\n') + '\n';
+  log.scrollTop = log.scrollHeight;
+}
 
 $('#saveConfig').addEventListener('click', withBusy($('#saveConfig'), async () => { const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ gpmBase: $('#gpmBase').value, macSyncPath: $('#macSyncPath').value }) }); state.config = data.config; notice('Đã lưu cấu hình cho phiên chạy này.'); }));
 $('#reloadProfiles').addEventListener('click', withBusy($('#reloadProfiles'), loadProfiles));
